@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<title>Duelo Agro - Preguntas por Puntos</title>
+<style>
+  :root{
+    --bg:#0d1117; --card:#161b22; --border:#2a2f3a;
+    --accent:#2ecc71; --accent2:#3b82f6; --red:#ef4444; --gold:#f5a623;
+    --text:#e6edf3; --muted:#8b949e;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html{-webkit-text-size-adjust:100%;}
+  body{
+    margin:0; font-family:'Segoe UI', Roboto, Arial, sans-serif;
+    background:linear-gradient(160deg,#0d1117,#131a24);
+    color:var(--text); min-height:100vh; padding:20px 14px; overflow-x:hidden;
+  }
+  .wrap{max-width:640px; margin:0 auto; width:100%;}
+  h1{font-size:1.4rem; text-align:center; margin-bottom:4px; color:#fff;}
+  .subtitle{text-align:center; color:var(--muted); font-size:.9rem; margin-bottom:20px;}
+  .card{
+    background:var(--card); border:1px solid var(--border); border-radius:14px;
+    padding:22px; margin-bottom:16px; box-shadow:0 4px 20px rgba(0,0,0,.3);
+  }
+  label{display:block; font-size:.85rem; color:var(--muted); margin-bottom:6px;}
+  input{
+    width:100%; padding:12px 14px; border-radius:9px; border:1px solid var(--border);
+    background:#0d1117; color:#fff; font-size:1rem; margin-bottom:14px;
+  }
+  input:focus{outline:none; border-color:var(--accent2);}
+  button{
+    background:var(--accent2); color:#fff; border:none; padding:13px 22px;
+    border-radius:9px; font-size:.95rem; cursor:pointer; font-weight:600;
+    transition:.15s; min-height:46px; width:100%;
+  }
+  button:hover{opacity:.85;}
+  button:disabled{opacity:.4; cursor:not-allowed;}
+  .btn-secondary{background:#21262d; border:1px solid var(--border);}
+  .btn-accent{background:var(--accent);}
+  .divider{text-align:center; color:var(--muted); font-size:.8rem; margin:18px 0; position:relative;}
+  .divider::before,.divider::after{content:''; position:absolute; top:50%; width:40%; height:1px; background:var(--border);}
+  .divider::before{left:0;} .divider::after{right:0;}
+  .code-display{
+    font-size:2.6rem; font-weight:800; text-align:center; letter-spacing:8px;
+    color:var(--accent); margin:14px 0; padding:14px; background:#0d1117;
+    border-radius:10px; border:1px dashed var(--accent);
+  }
+  .center{text-align:center;}
+  .spinner{
+    width:34px; height:34px; border:3px solid var(--border); border-top-color:var(--accent2);
+    border-radius:50%; margin:14px auto; animation:spin 1s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .muted{color:var(--muted); font-size:.9rem;}
+  .error-msg{color:var(--red); font-size:.85rem; margin-top:-8px; margin-bottom:10px; display:none;}
+  .error-msg.show{display:block;}
+
+  /* juego */
+  .scoreboard{display:flex; gap:10px; margin-bottom:14px;}
+  .score-card{
+    flex:1; background:var(--card); border:1px solid var(--border); border-radius:12px;
+    padding:12px 10px; text-align:center; position:relative; overflow:hidden;
+  }
+  .score-card.active{border-color:var(--accent2); box-shadow:0 0 0 2px rgba(59,130,246,.25);}
+  .score-card .pname{font-size:.8rem; color:var(--muted); margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .score-card .pscore{font-size:1.6rem; font-weight:800; color:#fff;}
+  .turn-badge{
+    display:inline-block; font-size:.68rem; background:var(--accent2); color:#fff;
+    padding:2px 8px; border-radius:10px; margin-top:4px; font-weight:700;
+  }
+  .progress-bar{width:100%; height:8px; background:#21262d; border-radius:5px; overflow:hidden; margin-bottom:16px;}
+  .progress-fill{height:100%; background:linear-gradient(90deg,var(--accent2),var(--accent)); width:0%; transition:width .3s ease;}
+  .turn-banner{
+    text-align:center; font-weight:700; font-size:1rem; margin-bottom:14px; padding:10px;
+    border-radius:10px; background:#0d1117; border:1px solid var(--border);
+  }
+  .turn-banner.mine{color:var(--accent); border-color:#1f5c3d;}
+  .turn-banner.theirs{color:var(--gold); border-color:#5c4a1f;}
+  .qtext{font-size:1.05rem; line-height:1.5; margin-bottom:18px; color:#fff;}
+  .options{display:flex; flex-direction:column; gap:10px;}
+  .option{
+    background:#1c2330; border:1px solid var(--border); border-radius:10px;
+    padding:13px 14px; cursor:pointer; transition:.15s; font-size:.95rem; line-height:1.45;
+    display:flex; gap:10px; align-items:flex-start; min-height:44px;
+  }
+  .option:hover{border-color:var(--accent2); background:#212a3a;}
+  .option.correct{border-color:var(--accent); background:#123024; color:#c9f7d9;}
+  .option.incorrect{border-color:var(--red); background:#3a1418; color:#ffd0d0;}
+  .option.disabled{cursor:default; pointer-events:none; opacity:.85;}
+  .letter{
+    flex-shrink:0; width:24px; height:24px; border-radius:6px; background:#2a2f3a;
+    display:flex; align-items:center; justify-content:center; font-size:.8rem; font-weight:700;
+  }
+  .timer-bar{width:100%; height:5px; background:#21262d; border-radius:5px; overflow:hidden; margin-bottom:14px;}
+  .timer-fill{height:100%; background:var(--gold); width:100%; transition:width 1s linear;}
+  .feedback{margin-top:14px; padding:12px 14px; border-radius:10px; font-size:.9rem; display:none;}
+  .feedback.show{display:block;}
+  .feedback.ok{background:#123024; color:#8ff0b6; border:1px solid var(--accent);}
+  .feedback.bad{background:#3a1418; color:#ffb3b3; border:1px solid var(--red);}
+  .waiting-note{text-align:center; color:var(--muted); font-size:.9rem; margin-top:10px;}
+
+  /* resultado */
+  .result-title{font-size:1.6rem; text-align:center; margin-bottom:10px;}
+  .winner{font-size:1.8rem; text-align:center; font-weight:800; margin:10px 0; color:var(--gold);}
+  .final-scores{display:flex; gap:12px; margin:16px 0;}
+  .final-scores .score-card .pscore{font-size:2.2rem;}
+
+  .hidden{display:none;}
+
+  @media (max-width: 480px){
+    body{padding:14px 10px;}
+    h1{font-size:1.15rem;}
+    .card{padding:16px 14px; border-radius:12px;}
+    .code-display{font-size:2rem; letter-spacing:5px;}
+    .qtext{font-size:1rem;}
+    .option{font-size:.9rem; padding:12px;}
+    .score-card .pscore{font-size:1.3rem;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>⚔️ Duelo Agro</h1>
+  <p class="subtitle">Preguntas por turnos - Fundamentos de Agronomía y Biología</p>
+
+  <!-- LOBBY -->
+  <div id="lobby">
+    <div class="card">
+      <label for="nameInput">Tu nombre</label>
+      <input id="nameInput" type="text" placeholder="Ej: Arti" maxlength="20">
+      <button id="createBtn" class="btn-accent">Crear sala</button>
+      <div class="divider">o únete a una sala existente</div>
+      <label for="codeInput">Código de sala</label>
+      <input id="codeInput" type="text" inputmode="numeric" maxlength="4" placeholder="1234">
+      <div class="error-msg" id="joinError"></div>
+      <button id="joinBtn" class="btn-secondary">Unirse a sala</button>
+    </div>
+  </div>
+
+  <!-- ESPERANDO RIVAL -->
+  <div id="waitingRoom" class="hidden">
+    <div class="card center">
+      <p class="muted">Comparte este código con tu rival:</p>
+      <div class="code-display" id="roomCodeDisplay"></div>
+      <div class="spinner"></div>
+      <p class="muted">Esperando a que se una el segundo jugador...</p>
+    </div>
+  </div>
+
+  <!-- JUEGO -->
+  <div id="gameArea" class="hidden">
+    <div class="scoreboard" id="scoreboard"></div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="turn-banner" id="turnBanner"></div>
+    <div class="card">
+      <div class="timer-bar"><div class="timer-fill" id="timerFill"></div></div>
+      <div class="qtext" id="qtext"></div>
+      <div class="options" id="options"></div>
+      <div class="feedback" id="feedback"></div>
+      <div class="waiting-note hidden" id="waitingNote">Esperando la respuesta del rival...</div>
+    </div>
+  </div>
+
+  <!-- RESULTADO -->
+  <div id="resultArea" class="hidden">
+    <div class="card center">
+      <div class="result-title">🏁 Duelo terminado</div>
+      <div class="winner" id="winnerText"></div>
+      <div class="final-scores" id="finalScores"></div>
+      <button id="rematchBtn" class="btn-accent">Revancha</button>
+      <button id="newRoomBtn" class="btn-secondary" style="margin-top:10px;">Salir a inicio</button>
+    </div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+let myIndex = null;
+let myName = '';
+let roomCode = '';
+let totalQ = 10;
+let timerInterval = null;
+const TURN_TIME_S = 20;
+
+const $ = (id) => document.getElementById(id);
+const LETTERS = ['A','B','C','D'];
+
+function show(id){ ['lobby','waitingRoom','gameArea','resultArea'].forEach(x=>$(x).classList.toggle('hidden', x!==id)); }
+
+// ---- LOBBY ----
+$('createBtn').onclick = () => {
+  myName = $('nameInput').value.trim() || 'Jugador 1';
+  socket.emit('create_room', { name: myName });
+};
+
+$('joinBtn').onclick = () => {
+  myName = $('nameInput').value.trim() || 'Jugador 2';
+  const code = $('codeInput').value.trim();
+  $('joinError').classList.remove('show');
+  if(!/^\d{4}$/.test(code)){
+    $('joinError').textContent = 'Ingresa un código válido de 4 dígitos.';
+    $('joinError').classList.add('show');
+    return;
+  }
+  socket.emit('join_room', { code, name: myName });
+};
+
+socket.on('room_created', ({code}) => {
+  roomCode = code;
+  myIndex = 0;
+  $('roomCodeDisplay').textContent = code;
+  show('waitingRoom');
+});
+
+socket.on('join_error', ({message}) => {
+  $('joinError').textContent = message;
+  $('joinError').classList.add('show');
+});
+
+// ---- JUEGO ----
+socket.on('game_start', (state) => {
+  myIndex = myIndex !== null ? myIndex : 1;
+  roomCode = roomCode || '';
+  totalQ = state.total;
+  show('gameArea');
+  renderState(state);
+});
+
+socket.on('question_update', (state) => {
+  renderState(state);
+});
+
+function renderState(state){
+  totalQ = state.total;
+  // scoreboard
+  const sb = $('scoreboard');
+  sb.innerHTML = '';
+  state.players.forEach((p, i) => {
+    const div = document.createElement('div');
+    div.className = 'score-card' + (state.turnPlayer === i ? ' active' : '');
+    div.innerHTML = `<div class="pname">${p.name}${i===myIndex ? ' (tú)':''}</div><div class="pscore">${p.score}</div>${state.turnPlayer===i ? '<div class="turn-badge">Su turno</div>':''}`;
+    sb.appendChild(div);
+  });
+
+  $('progressFill').style.width = (state.currentIndex/totalQ*100)+'%';
+
+  const isMine = state.turnPlayer === myIndex;
+  const banner = $('turnBanner');
+  banner.className = 'turn-banner ' + (isMine ? 'mine':'theirs');
+  banner.textContent = isMine ? '🎯 ¡Es tu turno! Responde la pregunta.' : `⏳ Turno de ${state.players[state.turnPlayer].name}`;
+
+  $('qtext').textContent = `Pregunta ${state.currentIndex+1}/${totalQ}: ${state.question.q}`;
+  const optsDiv = $('options');
+  optsDiv.innerHTML = '';
+  $('feedback').classList.remove('show','ok','bad');
+  $('waitingNote').classList.toggle('hidden', isMine);
+
+  state.question.options.forEach((opt, idx) => {
+    const div = document.createElement('div');
+    div.className = 'option' + (isMine ? '' : ' disabled');
+    div.innerHTML = `<span class="letter">${LETTERS[idx]}</span><span>${opt}</span>`;
+    if(isMine){
+      div.onclick = () => {
+        document.querySelectorAll('.option').forEach(o=>o.classList.add('disabled'));
+        socket.emit('submit_answer', { optionIndex: idx });
+      };
+    }
+    optsDiv.appendChild(div);
+  });
+
+  startTimerBar();
+}
+
+function startTimerBar(){
+  clearInterval(timerInterval);
+  let t = TURN_TIME_S;
+  $('timerFill').style.width = '100%';
+  $('timerFill').style.background = 'var(--gold)';
+  timerInterval = setInterval(() => {
+    t -= 1;
+    const pct = Math.max(0, (t/TURN_TIME_S)*100);
+    $('timerFill').style.width = pct+'%';
+    if(t <= 5) $('timerFill').style.background = 'var(--red)';
+    if(t <= 0) clearInterval(timerInterval);
+  }, 1000);
+}
+
+socket.on('answer_result', ({playerIndex, optionIndex, correctIndex, isCorrect, timedOut, scores}) => {
+  clearInterval(timerInterval);
+  const options = document.querySelectorAll('.option');
+  options.forEach((el,i)=>{
+    el.classList.add('disabled');
+    if(i===correctIndex) el.classList.add('correct');
+    if(i===optionIndex && !isCorrect) el.classList.add('incorrect');
+  });
+  const fb = $('feedback');
+  fb.classList.add('show', isCorrect ? 'ok':'bad');
+  const who = playerIndex === myIndex ? 'Tú' : 'Tu rival';
+  if(timedOut){
+    fb.textContent = `⏱️ ${who} no respondió a tiempo. Respuesta correcta: ${LETTERS[correctIndex]})`;
+  } else {
+    fb.textContent = isCorrect ? `✅ ${who} acertó.` : `❌ ${who} falló. Correcta: ${LETTERS[correctIndex]})`;
+  }
+  $('waitingNote').classList.add('hidden');
+
+  // actualizar puntajes visibles de inmediato
+  document.querySelectorAll('.score-card .pscore').forEach((el,i)=>{ el.textContent = scores[i]; });
+});
+
+socket.on('game_over', ({scores, players}) => {
+  clearInterval(timerInterval);
+  show('resultArea');
+  const [s0, s1] = scores;
+  const winnerText = $('winnerText');
+  if(s0 === s1){
+    winnerText.textContent = '🤝 ¡Empate!';
+  } else {
+    const winnerIdx = s0 > s1 ? 0 : 1;
+    const iWon = winnerIdx === myIndex;
+    winnerText.textContent = iWon ? `🏆 ¡Ganaste, ${players[winnerIdx]}!` : `🏆 Ganó ${players[winnerIdx]}`;
+  }
+  const fs = $('finalScores');
+  fs.innerHTML = '';
+  players.forEach((name, i)=>{
+    const div = document.createElement('div');
+    div.className = 'score-card';
+    div.innerHTML = `<div class="pname">${name}${i===myIndex?' (tú)':''}</div><div class="pscore">${scores[i]}</div>`;
+    fs.appendChild(div);
+  });
+});
+
+$('rematchBtn').onclick = () => socket.emit('rematch');
+$('newRoomBtn').onclick = () => location.reload();
+
+socket.on('opponent_left', () => {
+  if(!$('resultArea').classList.contains('hidden')) return;
+  alert('Tu rival se desconectó.');
+});
+</script>
+</body>
+</html>
