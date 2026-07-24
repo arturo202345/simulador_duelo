@@ -93,7 +93,8 @@ const BANK = [
 const QUESTIONS_PER_PLAYER = 5;
 const TOTAL_QUESTIONS = QUESTIONS_PER_PLAYER * 2;
 const NEXT_DELAY_MS = 3200; // tiempo para mostrar feedback antes de pasar de turno
-const TURN_TIME_MS = 20000; // tiempo limite por pregunta (ronda normal)
+const TURN_TIME_MS = 20000; // tiempo limite por pregunta (ronda normal) / ventana para tocar en modo rapidez
+const ANSWER_AFTER_BUZZ_MS = 10000; // tiempo para responder una vez que alguien toco primero (modo rapidez)
 
 // Desempate: rondas mas cortas y con menos tiempo, se repiten hasta que haya ganador
 const TIEBREAK_QUESTIONS_PER_PLAYER = 2;
@@ -138,15 +139,18 @@ const rooms = {};
 function publicState(room) {
   const idx = room.currentIndex;
   const total = room.totalQuestions;
-  const turnPlayer = idx < total ? room.turnOrder[idx] : null;
+  const turnPlayer =
+    idx >= total ? null : room.mode === 'rapidez' ? (room.buzzedPlayer ?? null) : room.turnOrder[idx];
   return {
     players: room.players.map((p) => ({ name: p.name, score: p.score, connected: p.connected })),
     currentIndex: idx,
     total,
     turnPlayer,
+    mode: room.mode || 'duelo',
     question: idx < total ? { q: room.questions[idx].q, options: room.questions[idx].options } : null,
     status: room.status,
     turnTimeMs: room.turnTimeMs,
+    answerAfterBuzzMs: ANSWER_AFTER_BUZZ_MS,
     tiebreakRound: room.tiebreakRound || 0,
   };
 }
@@ -161,29 +165,59 @@ function startTurnTimer(code) {
   }, room.turnTimeMs);
 }
 
-function handleAnswer(code, playerIndex, optionIndex, timedOut) {
+// Modo rapidez: se abre una ventana donde cualquiera de los dos puede "tocar" primero
+// (tecla o boton) para ganar el derecho a responder esa pregunta.
+function startBuzzWindow(code) {
+  const room = rooms[code];
+  if (!room) return;
+  clearTimeout(room.timer);
+  room.buzzedPlayer = null;
+  room.timer = setTimeout(() => {
+    // nadie toco a tiempo -> nadie responde, se revela la correcta y se avanza
+    handleAnswer(code, null, -1, false, true);
+  }, room.turnTimeMs);
+}
+
+// Arranca la fase correspondiente segun el modo de la sala.
+function startQuestionPhase(code) {
+  const room = rooms[code];
+  if (!room) return;
+  if (room.mode === 'rapidez') startBuzzWindow(code);
+  else startTurnTimer(code);
+}
+
+function handleAnswer(code, playerIndex, optionIndex, timedOut, noBuzz) {
   const room = rooms[code];
   if (!room || room.status !== 'playing') return;
   const idx = room.currentIndex;
   const total = room.totalQuestions;
   if (idx >= total) return;
-  if (room.turnOrder[idx] !== playerIndex) return; // no es su turno
+
+  if (!noBuzz) {
+    if (room.mode === 'rapidez') {
+      if (room.buzzedPlayer !== playerIndex) return; // no fue quien toco primero
+    } else if (room.turnOrder[idx] !== playerIndex) {
+      return; // no es su turno
+    }
+  }
 
   clearTimeout(room.timer);
   const q = room.questions[idx];
-  const isCorrect = optionIndex === q.correct;
+  const isCorrect = !noBuzz && optionIndex === q.correct;
   if (isCorrect) room.players[playerIndex].score += 1;
 
   io.to(code).emit('answer_result', {
-    playerIndex,
-    optionIndex,
+    playerIndex: noBuzz ? null : playerIndex,
+    optionIndex: noBuzz ? -1 : optionIndex,
     correctIndex: q.correct,
     isCorrect,
     timedOut: !!timedOut,
+    noBuzz: !!noBuzz,
     scores: room.players.map((p) => p.score),
   });
 
   room.currentIndex += 1;
+  room.buzzedPlayer = null;
 
   setTimeout(() => {
     if (room.currentIndex >= total) {
@@ -201,7 +235,7 @@ function handleAnswer(code, playerIndex, optionIndex, timedOut) {
         room.currentIndex = 0;
         room.status = 'playing';
         io.to(code).emit('tiebreak_start', publicState(room));
-        startTurnTimer(code);
+        startQuestionPhase(code);
       } else {
         room.status = 'finished';
         io.to(code).emit('game_over', {
@@ -212,13 +246,13 @@ function handleAnswer(code, playerIndex, optionIndex, timedOut) {
       }
     } else {
       io.to(code).emit('question_update', publicState(room));
-      startTurnTimer(code);
+      startQuestionPhase(code);
     }
   }, NEXT_DELAY_MS);
 }
 
 io.on('connection', (socket) => {
-  socket.on('create_room', ({ name }) => {
+  socket.on('create_room', ({ name, mode }) => {
     const code = genCode();
     rooms[code] = {
       players: [{ id: socket.id, name: (name || 'Jugador 1').slice(0, 20), score: 0, connected: true }],
@@ -228,6 +262,8 @@ io.on('connection', (socket) => {
       totalQuestions: TOTAL_QUESTIONS,
       turnTimeMs: TURN_TIME_MS,
       tiebreakRound: 0,
+      mode: mode === 'rapidez' ? 'rapidez' : 'duelo',
+      buzzedPlayer: null,
       status: 'waiting',
       timer: null,
     };
@@ -253,10 +289,11 @@ io.on('connection', (socket) => {
     room.turnTimeMs = TURN_TIME_MS;
     room.tiebreakRound = 0;
     room.currentIndex = 0;
+    room.buzzedPlayer = null;
     room.status = 'playing';
 
     io.to(code).emit('game_start', publicState(room));
-    startTurnTimer(code);
+    startQuestionPhase(code);
   });
 
   socket.on('submit_answer', ({ optionIndex }) => {
@@ -264,6 +301,25 @@ io.on('connection', (socket) => {
     const playerIndex = socket.data.playerIndex;
     if (code === undefined || playerIndex === undefined) return;
     handleAnswer(code, playerIndex, optionIndex, false);
+  });
+
+  // Modo rapidez: alguien "toca" (tecla o boton) para ganar el turno de responder.
+  socket.on('buzz', () => {
+    const code = socket.data.code;
+    const playerIndex = socket.data.playerIndex;
+    if (code === undefined || playerIndex === undefined) return;
+    const room = rooms[code];
+    if (!room || room.status !== 'playing' || room.mode !== 'rapidez') return;
+    if (room.currentIndex >= room.totalQuestions) return;
+    if (room.buzzedPlayer !== null && room.buzzedPlayer !== undefined) return; // ya toco alguien
+
+    room.buzzedPlayer = playerIndex;
+    clearTimeout(room.timer);
+    io.to(code).emit('buzzed', { playerIndex, answerTimeMs: ANSWER_AFTER_BUZZ_MS });
+    room.timer = setTimeout(() => {
+      // toco primero pero no respondio a tiempo -> se cuenta como incorrecta
+      handleAnswer(code, playerIndex, -1, true);
+    }, ANSWER_AFTER_BUZZ_MS);
   });
 
   socket.on('rematch', () => {
@@ -277,9 +333,10 @@ io.on('connection', (socket) => {
     room.turnTimeMs = TURN_TIME_MS;
     room.tiebreakRound = 0;
     room.currentIndex = 0;
+    room.buzzedPlayer = null;
     room.status = 'playing';
     io.to(code).emit('game_start', publicState(room));
-    startTurnTimer(code);
+    startQuestionPhase(code);
   });
 
   socket.on('disconnect', () => {

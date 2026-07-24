@@ -115,6 +115,31 @@
 
   .hidden{display:none;}
 
+  /* selector de modo */
+  .mode-select{display:flex; gap:10px; margin-bottom:16px;}
+  .mode-btn{
+    flex:1; background:#1c2330; border:1px solid var(--border); border-radius:10px;
+    padding:12px 8px; text-align:center; font-size:.85rem; font-weight:600; color:var(--muted);
+  }
+  .mode-btn .mtitle{display:block; font-size:.95rem; color:#fff; margin-bottom:2px;}
+  .mode-btn .mdesc{display:block; font-size:.72rem; color:var(--muted); font-weight:400;}
+  .mode-btn.active{border-color:var(--accent2); background:#182437; color:var(--accent2);}
+  .mode-btn.active .mtitle{color:var(--accent2);}
+
+  /* modo rapidez */
+  .buzz-zone{
+    margin-top:14px; padding:16px; text-align:center; border-radius:12px;
+    border:2px dashed var(--gold); background:#1a1608; cursor:pointer; user-select:none;
+    font-weight:800; font-size:1rem; color:var(--gold); transition:.15s;
+  }
+  .buzz-zone:active{transform:scale(.97); background:#2a2108;}
+  .buzz-zone.locked{
+    border-style:solid; border-color:var(--border); color:var(--muted); cursor:default;
+    background:#0d1117;
+  }
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(245,166,35,.35);} 50%{box-shadow:0 0 0 10px rgba(245,166,35,0);}}
+  .buzz-zone.waiting{animation:pulse 1.4s infinite;}
+
   @media (max-width: 480px){
     body{padding:14px 10px;}
     h1{font-size:1.15rem;}
@@ -136,7 +161,19 @@
     <div class="card">
       <label for="nameInput">Tu nombre</label>
       <input id="nameInput" type="text" placeholder="Ej: Arti" maxlength="20">
+      <label>Modo de juego (lo elige quien crea la sala)</label>
+      <div class="mode-select">
+        <div class="mode-btn active" id="modeDuelo">
+          <span class="mtitle">⚔️ Duelo</span>
+          <span class="mdesc">Por turnos</span>
+        </div>
+        <div class="mode-btn" id="modeRapidez">
+          <span class="mtitle">⚡ Rapidez</span>
+          <span class="mdesc">Toca primero</span>
+        </div>
+      </div>
       <button id="createBtn" class="btn-accent">Crear sala</button>
+      <p class="muted" style="text-align:center; margin-top:8px; font-size:.75rem;">El modo elegido aquí solo aplica al crear una sala nueva.</p>
       <div class="divider">o únete a una sala existente</div>
       <label for="codeInput">Código de sala</label>
       <input id="codeInput" type="text" inputmode="numeric" maxlength="4" placeholder="1234">
@@ -164,6 +201,7 @@
     <div class="card">
       <div class="timer-bar"><div class="timer-fill" id="timerFill"></div></div>
       <div class="qtext" id="qtext"></div>
+      <div class="buzz-zone hidden" id="buzzZone">🔔 ¡Toca aquí o presiona cualquier tecla!</div>
       <div class="options" id="options"></div>
       <div class="feedback" id="feedback"></div>
       <div class="waiting-note hidden" id="waitingNote">Esperando la respuesta del rival...</div>
@@ -191,6 +229,10 @@ let roomCode = '';
 let totalQ = 10;
 let timerInterval = null;
 let turnTimeS = 20;
+let selectedMode = 'duelo';
+let gameMode = 'duelo';
+let lastState = null;
+let awaitingBuzz = false;
 
 const $ = (id) => document.getElementById(id);
 const LETTERS = ['A','B','C','D'];
@@ -198,9 +240,20 @@ const LETTERS = ['A','B','C','D'];
 function show(id){ ['lobby','waitingRoom','gameArea','resultArea'].forEach(x=>$(x).classList.toggle('hidden', x!==id)); }
 
 // ---- LOBBY ----
+$('modeDuelo').onclick = () => {
+  selectedMode = 'duelo';
+  $('modeDuelo').classList.add('active');
+  $('modeRapidez').classList.remove('active');
+};
+$('modeRapidez').onclick = () => {
+  selectedMode = 'rapidez';
+  $('modeRapidez').classList.add('active');
+  $('modeDuelo').classList.remove('active');
+};
+
 $('createBtn').onclick = () => {
   myName = $('nameInput').value.trim() || 'Jugador 1';
-  socket.emit('create_room', { name: myName });
+  socket.emit('create_room', { name: myName, mode: selectedMode });
 };
 
 $('joinBtn').onclick = () => {
@@ -232,6 +285,7 @@ socket.on('game_start', (state) => {
   myIndex = myIndex !== null ? myIndex : 1;
   roomCode = roomCode || '';
   totalQ = state.total;
+  gameMode = state.mode || 'duelo';
   show('gameArea');
   renderState(state);
 });
@@ -245,7 +299,9 @@ socket.on('tiebreak_start', (state) => {
 });
 
 function renderState(state){
+  lastState = state;
   totalQ = state.total;
+  gameMode = state.mode || 'duelo';
   turnTimeS = Math.round((state.turnTimeMs || 20000) / 1000);
 
   const tbBanner = $('tiebreakBanner');
@@ -256,13 +312,17 @@ function renderState(state){
     tbBanner.classList.remove('show');
   }
 
+  const rapidez = gameMode === 'rapidez';
+  const nobodyBuzzedYet = rapidez && state.turnPlayer === null;
+
   // scoreboard
   const sb = $('scoreboard');
   sb.innerHTML = '';
   state.players.forEach((p, i) => {
     const div = document.createElement('div');
     div.className = 'score-card' + (state.turnPlayer === i ? ' active' : '');
-    div.innerHTML = `<div class="pname">${p.name}${i===myIndex ? ' (tú)':''}</div><div class="pscore">${p.score}</div>${state.turnPlayer===i ? '<div class="turn-badge">Su turno</div>':''}`;
+    const badge = state.turnPlayer === i ? `<div class="turn-badge">${rapidez ? '¡Tocó primero!' : 'Su turno'}</div>` : '';
+    div.innerHTML = `<div class="pname">${p.name}${i===myIndex ? ' (tú)':''}</div><div class="pscore">${p.score}</div>${badge}`;
     sb.appendChild(div);
   });
 
@@ -270,20 +330,32 @@ function renderState(state){
 
   const isMine = state.turnPlayer === myIndex;
   const banner = $('turnBanner');
-  banner.className = 'turn-banner ' + (isMine ? 'mine':'theirs');
-  banner.textContent = isMine ? '🎯 ¡Es tu turno! Responde la pregunta.' : `⏳ Turno de ${state.players[state.turnPlayer].name}`;
+  if(rapidez){
+    if(nobodyBuzzedYet){
+      banner.className = 'turn-banner';
+      banner.textContent = '🔥 ¡Prepárate! El primero en tocar responde.';
+    } else {
+      banner.className = 'turn-banner ' + (isMine ? 'mine':'theirs');
+      banner.textContent = isMine ? '🎯 ¡Tocaste primero! Responde la pregunta.' : `⏳ ${state.players[state.turnPlayer].name} tocó primero...`;
+    }
+  } else {
+    banner.className = 'turn-banner ' + (isMine ? 'mine':'theirs');
+    banner.textContent = isMine ? '🎯 ¡Es tu turno! Responde la pregunta.' : `⏳ Turno de ${state.players[state.turnPlayer].name}`;
+  }
 
   $('qtext').textContent = `Pregunta ${state.currentIndex+1}/${totalQ}: ${state.question.q}`;
   const optsDiv = $('options');
   optsDiv.innerHTML = '';
   $('feedback').classList.remove('show','ok','bad');
-  $('waitingNote').classList.toggle('hidden', isMine);
+
+  const canAnswer = rapidez ? isMine && !nobodyBuzzedYet : isMine;
+  $('waitingNote').classList.toggle('hidden', canAnswer || nobodyBuzzedYet);
 
   state.question.options.forEach((opt, idx) => {
     const div = document.createElement('div');
-    div.className = 'option' + (isMine ? '' : ' disabled');
+    div.className = 'option' + (canAnswer ? '' : ' disabled');
     div.innerHTML = `<span class="letter">${LETTERS[idx]}</span><span>${opt}</span>`;
-    if(isMine){
+    if(canAnswer){
       div.onclick = () => {
         document.querySelectorAll('.option').forEach(o=>o.classList.add('disabled'));
         socket.emit('submit_answer', { optionIndex: idx });
@@ -292,8 +364,45 @@ function renderState(state){
     optsDiv.appendChild(div);
   });
 
+  // zona de "toque" para el modo rapidez
+  const buzzZone = $('buzzZone');
+  if(rapidez && nobodyBuzzedYet){
+    awaitingBuzz = true;
+    buzzZone.classList.remove('hidden','locked');
+    buzzZone.classList.add('waiting');
+    buzzZone.textContent = '🔔 ¡Toca aquí o presiona cualquier tecla!';
+  } else if(rapidez){
+    awaitingBuzz = false;
+    buzzZone.classList.remove('waiting');
+    buzzZone.classList.add('locked');
+    buzzZone.textContent = isMine ? '🎯 ¡Tocaste primero!' : `⏳ ${state.players[state.turnPlayer].name} tocó primero`;
+  } else {
+    awaitingBuzz = false;
+    buzzZone.classList.add('hidden');
+  }
+
   startTimerBar();
 }
+
+function tryBuzz(){
+  if(!awaitingBuzz || gameMode !== 'rapidez') return;
+  awaitingBuzz = false;
+  socket.emit('buzz');
+}
+
+$('buzzZone').addEventListener('click', tryBuzz);
+$('buzzZone').addEventListener('touchstart', (e) => { e.preventDefault(); tryBuzz(); }, { passive:false });
+document.addEventListener('keydown', () => {
+  if(!$('gameArea').classList.contains('hidden')) tryBuzz();
+});
+
+socket.on('buzzed', ({ playerIndex, answerTimeMs }) => {
+  if(!lastState) return;
+  awaitingBuzz = false;
+  lastState.turnPlayer = playerIndex;
+  if(answerTimeMs) turnTimeS = Math.round(answerTimeMs / 1000);
+  renderState(lastState);
+});
 
 function startTimerBar(){
   clearInterval(timerInterval);
@@ -309,18 +418,26 @@ function startTimerBar(){
   }, 1000);
 }
 
-socket.on('answer_result', ({playerIndex, optionIndex, correctIndex, isCorrect, timedOut, scores}) => {
+socket.on('answer_result', ({playerIndex, optionIndex, correctIndex, isCorrect, timedOut, noBuzz, scores}) => {
   clearInterval(timerInterval);
+  awaitingBuzz = false;
   const options = document.querySelectorAll('.option');
   options.forEach((el,i)=>{
     el.classList.add('disabled');
     if(i===correctIndex) el.classList.add('correct');
     if(i===optionIndex && !isCorrect) el.classList.add('incorrect');
   });
+  const buzzZone = $('buzzZone');
+  if(!buzzZone.classList.contains('hidden')){
+    buzzZone.classList.remove('waiting');
+    buzzZone.classList.add('locked');
+  }
   const fb = $('feedback');
   fb.classList.add('show', isCorrect ? 'ok':'bad');
-  const who = playerIndex === myIndex ? 'Tú' : 'Tu rival';
-  if(timedOut){
+  const who = playerIndex === myIndex ? 'Tú' : (playerIndex === null ? 'Nadie' : 'Tu rival');
+  if(noBuzz){
+    fb.textContent = `🔕 ¡Nadie tocó a tiempo! Respuesta correcta: ${LETTERS[correctIndex]})`;
+  } else if(timedOut){
     fb.textContent = `⏱️ ${who} no respondió a tiempo. Respuesta correcta: ${LETTERS[correctIndex]})`;
   } else {
     fb.textContent = isCorrect ? `✅ ${who} acertó.` : `❌ ${who} falló. Correcta: ${LETTERS[correctIndex]})`;
