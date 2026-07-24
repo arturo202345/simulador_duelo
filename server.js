@@ -90,17 +90,11 @@ const BANK = [
 ["Un sistema que mantiene disponibilidad y acceso pero falla en inocuidad alimentaria afecta el componente de:",["Acceso.","Utilización.","Disponibilidad.","Estabilidad."],1]
 ];
 
-const QUESTIONS_PER_PLAYER = 5;
-const TOTAL_QUESTIONS = QUESTIONS_PER_PLAYER * 2;
-const NEXT_DELAY_MS = 3200; // tiempo para mostrar feedback antes de pasar de turno
-const TURN_TIME_MS = 20000; // tiempo limite por pregunta (ronda normal) / ventana para tocar en modo rapidez
-const ANSWER_AFTER_BUZZ_MS = 10000; // tiempo para responder una vez que alguien toco primero (modo rapidez)
-
-// Desempate: rondas mas cortas y con menos tiempo, se repiten hasta que haya ganador
-const TIEBREAK_QUESTIONS_PER_PLAYER = 2;
-const TIEBREAK_TOTAL_QUESTIONS = TIEBREAK_QUESTIONS_PER_PLAYER * 2;
-const TIEBREAK_TIME_STEP_MS = 3000; // cuanto se reduce el tiempo por cada ronda extra
-const TIEBREAK_MIN_TIME_MS = 6000; // piso minimo de tiempo por pregunta
+const WIN_SCORE = 10; // gana el primero en llegar a este puntaje (sin empates posibles)
+const NEXT_DELAY_MS = 3200; // tiempo para mostrar feedback antes de pasar a la siguiente pregunta
+const TURN_TIME_MS = 20000; // tiempo limite por pregunta (duelo) / ventana para tocar (rapidez)
+const READ_DELAY_MS = 3000; // modo rapidez: tiempo para leer la pregunta antes de habilitar el "toque"
+const ANSWER_AFTER_BUZZ_MS = 10000; // tiempo para responder una vez que alguien toco primero (rapidez)
 
 function shuffle(arr) {
   const a = arr.slice();
@@ -111,9 +105,8 @@ function shuffle(arr) {
   return a;
 }
 
-function buildQuestionSet(count) {
-  const chosen = shuffle(BANK).slice(0, count);
-  return chosen.map(([q, opts, correctIdx]) => {
+function buildDeck() {
+  return shuffle(BANK).map(([q, opts, correctIdx]) => {
     const correctText = opts[correctIdx];
     const order = shuffle(opts.map((_, i) => i));
     const newOpts = order.map((i) => opts[i]);
@@ -121,8 +114,15 @@ function buildQuestionSet(count) {
   });
 }
 
-function buildTurnOrder(total, startPlayer) {
-  return Array.from({ length: total }, (_, i) => (i + startPlayer) % 2);
+// Mazo "infinito": reparte todo el banco barajado y, cuando se acaba, lo vuelve a barajar.
+function nextQuestion(room) {
+  if (!room.deck || room.deckPos >= room.deck.length) {
+    room.deck = buildDeck();
+    room.deckPos = 0;
+  }
+  const q = room.deck[room.deckPos];
+  room.deckPos += 1;
+  return q;
 }
 
 function genCode() {
@@ -133,25 +133,28 @@ function genCode() {
   return code;
 }
 
-// rooms[code] = { players: [{id,name,score,connected}], questions, turnOrder, currentIndex, timer, status }
+// rooms[code] = { players, mode, deck, deckPos, currentQuestion, currentIndex, startPlayer, buzzedPlayer, buzzOpen, timer, status }
 const rooms = {};
 
 function publicState(room) {
-  const idx = room.currentIndex;
-  const total = room.totalQuestions;
+  const rapidez = room.mode === 'rapidez';
   const turnPlayer =
-    idx >= total ? null : room.mode === 'rapidez' ? (room.buzzedPlayer ?? null) : room.turnOrder[idx];
+    room.status !== 'playing'
+      ? null
+      : rapidez
+      ? (room.buzzOpen ? room.buzzedPlayer : null)
+      : (room.currentIndex + room.startPlayer) % 2;
   return {
     players: room.players.map((p) => ({ name: p.name, score: p.score, connected: p.connected })),
-    currentIndex: idx,
-    total,
+    currentIndex: room.currentIndex,
+    winScore: WIN_SCORE,
     turnPlayer,
     mode: room.mode || 'duelo',
-    question: idx < total ? { q: room.questions[idx].q, options: room.questions[idx].options } : null,
+    question: room.currentQuestion ? { q: room.currentQuestion.q, options: room.currentQuestion.options } : null,
     status: room.status,
     turnTimeMs: room.turnTimeMs,
+    readDelayMs: READ_DELAY_MS,
     answerAfterBuzzMs: ANSWER_AFTER_BUZZ_MS,
-    tiebreakRound: room.tiebreakRound || 0,
   };
 }
 
@@ -159,50 +162,75 @@ function startTurnTimer(code) {
   const room = rooms[code];
   if (!room) return;
   clearTimeout(room.timer);
+  const turnPlayer = (room.currentIndex + room.startPlayer) % 2;
   room.timer = setTimeout(() => {
     // se acabo el tiempo -> se cuenta como incorrecta, avanza automaticamente
-    handleAnswer(code, room.turnOrder[room.currentIndex], -1, true);
+    handleAnswer(code, turnPlayer, -1, true);
   }, room.turnTimeMs);
 }
 
-// Modo rapidez: se abre una ventana donde cualquiera de los dos puede "tocar" primero
-// (tecla o boton) para ganar el derecho a responder esa pregunta.
+// Modo rapidez: primero se da un momento para leer la pregunta, y recien despues se
+// habilita la ventana donde cualquiera de los dos puede "tocar" primero (tecla o boton)
+// para ganar el derecho a responder.
 function startBuzzWindow(code) {
   const room = rooms[code];
   if (!room) return;
   clearTimeout(room.timer);
   room.buzzedPlayer = null;
+  room.buzzOpen = false;
+  io.to(code).emit('reading_phase', { readDelayMs: READ_DELAY_MS });
   room.timer = setTimeout(() => {
-    // nadie toco a tiempo -> nadie responde, se revela la correcta y se avanza
-    handleAnswer(code, null, -1, false, true);
-  }, room.turnTimeMs);
+    const r = rooms[code];
+    if (!r || r.status !== 'playing') return;
+    r.buzzOpen = true;
+    io.to(code).emit('buzz_open', {});
+    r.timer = setTimeout(() => {
+      // nadie toco a tiempo -> nadie responde, se revela la correcta y se avanza
+      handleAnswer(code, null, -1, false, true);
+    }, r.turnTimeMs);
+  }, READ_DELAY_MS);
 }
 
-// Arranca la fase correspondiente segun el modo de la sala.
-function startQuestionPhase(code) {
+// Arranca el cronometro/ventana de "toque" para la pregunta ya cargada en la sala.
+function armQuestionTimer(code) {
   const room = rooms[code];
   if (!room) return;
   if (room.mode === 'rapidez') startBuzzWindow(code);
   else startTurnTimer(code);
 }
 
+// Primera pregunta de una partida (se manda dentro del propio evento game_start).
+function beginGame(code) {
+  const room = rooms[code];
+  if (!room) return;
+  room.currentQuestion = nextQuestion(room);
+  io.to(code).emit('game_start', publicState(room));
+  armQuestionTimer(code);
+}
+
+// Pasa a la siguiente pregunta dentro de una partida en curso.
+function advanceQuestion(code) {
+  const room = rooms[code];
+  if (!room) return;
+  room.currentQuestion = nextQuestion(room);
+  io.to(code).emit('question_update', publicState(room));
+  armQuestionTimer(code);
+}
+
 function handleAnswer(code, playerIndex, optionIndex, timedOut, noBuzz) {
   const room = rooms[code];
   if (!room || room.status !== 'playing') return;
-  const idx = room.currentIndex;
-  const total = room.totalQuestions;
-  if (idx >= total) return;
 
   if (!noBuzz) {
     if (room.mode === 'rapidez') {
-      if (room.buzzedPlayer !== playerIndex) return; // no fue quien toco primero
-    } else if (room.turnOrder[idx] !== playerIndex) {
+      if (!room.buzzOpen || room.buzzedPlayer !== playerIndex) return; // no fue quien toco primero
+    } else if ((room.currentIndex + room.startPlayer) % 2 !== playerIndex) {
       return; // no es su turno
     }
   }
 
   clearTimeout(room.timer);
-  const q = room.questions[idx];
+  const q = room.currentQuestion;
   const isCorrect = !noBuzz && optionIndex === q.correct;
   if (isCorrect) room.players[playerIndex].score += 1;
 
@@ -218,37 +246,34 @@ function handleAnswer(code, playerIndex, optionIndex, timedOut, noBuzz) {
 
   room.currentIndex += 1;
   room.buzzedPlayer = null;
+  room.buzzOpen = false;
 
   setTimeout(() => {
-    if (room.currentIndex >= total) {
-      const [s0, s1] = room.players.map((p) => p.score);
-      if (s0 === s1) {
-        // Empate -> ronda de desempate: menos preguntas y menos tiempo, reinicia marcador
-        room.tiebreakRound = (room.tiebreakRound || 0) + 1;
-        room.turnTimeMs = Math.max(TIEBREAK_MIN_TIME_MS, (room.turnTimeMs || TURN_TIME_MS) - TIEBREAK_TIME_STEP_MS);
-        room.players.forEach((p) => (p.score = 0));
-        room.totalQuestions = TIEBREAK_TOTAL_QUESTIONS;
-        room.questions = buildQuestionSet(TIEBREAK_TOTAL_QUESTIONS);
-        // el jugador que no empezo la ronda anterior arranca esta, para que sea justo
-        const startPlayer = room.tiebreakRound % 2;
-        room.turnOrder = buildTurnOrder(TIEBREAK_TOTAL_QUESTIONS, startPlayer);
-        room.currentIndex = 0;
-        room.status = 'playing';
-        io.to(code).emit('tiebreak_start', publicState(room));
-        startQuestionPhase(code);
-      } else {
-        room.status = 'finished';
-        io.to(code).emit('game_over', {
-          scores: room.players.map((p) => p.score),
-          players: room.players.map((p) => p.name),
-          tiebreakRound: room.tiebreakRound || 0,
-        });
-      }
+    const room2 = rooms[code];
+    if (!room2 || room2.status !== 'playing') return;
+    const winnerIdx = room2.players.findIndex((p) => p.score >= WIN_SCORE);
+    if (winnerIdx !== -1) {
+      room2.status = 'finished';
+      io.to(code).emit('game_over', {
+        scores: room2.players.map((p) => p.score),
+        players: room2.players.map((p) => p.name),
+      });
     } else {
-      io.to(code).emit('question_update', publicState(room));
-      startQuestionPhase(code);
+      advanceQuestion(code);
     }
   }, NEXT_DELAY_MS);
+}
+
+function setupRoomForNewGame(room) {
+  room.players.forEach((p) => (p.score = 0));
+  room.deck = buildDeck();
+  room.deckPos = 0;
+  room.currentQuestion = null;
+  room.currentIndex = 0;
+  room.turnTimeMs = TURN_TIME_MS;
+  room.buzzedPlayer = null;
+  room.buzzOpen = false;
+  room.status = 'playing';
 }
 
 io.on('connection', (socket) => {
@@ -256,14 +281,15 @@ io.on('connection', (socket) => {
     const code = genCode();
     rooms[code] = {
       players: [{ id: socket.id, name: (name || 'Jugador 1').slice(0, 20), score: 0, connected: true }],
-      questions: [],
-      turnOrder: [],
+      deck: [],
+      deckPos: 0,
+      currentQuestion: null,
       currentIndex: 0,
-      totalQuestions: TOTAL_QUESTIONS,
+      startPlayer: 0,
       turnTimeMs: TURN_TIME_MS,
-      tiebreakRound: 0,
       mode: mode === 'rapidez' ? 'rapidez' : 'duelo',
       buzzedPlayer: null,
+      buzzOpen: false,
       status: 'waiting',
       timer: null,
     };
@@ -283,17 +309,9 @@ io.on('connection', (socket) => {
     socket.data.code = code;
     socket.data.playerIndex = 1;
 
-    room.questions = buildQuestionSet(TOTAL_QUESTIONS);
-    room.turnOrder = buildTurnOrder(TOTAL_QUESTIONS, 0);
-    room.totalQuestions = TOTAL_QUESTIONS;
-    room.turnTimeMs = TURN_TIME_MS;
-    room.tiebreakRound = 0;
-    room.currentIndex = 0;
-    room.buzzedPlayer = null;
-    room.status = 'playing';
-
-    io.to(code).emit('game_start', publicState(room));
-    startQuestionPhase(code);
+    room.startPlayer = 0;
+    setupRoomForNewGame(room);
+    beginGame(code);
   });
 
   socket.on('submit_answer', ({ optionIndex }) => {
@@ -309,8 +327,7 @@ io.on('connection', (socket) => {
     const playerIndex = socket.data.playerIndex;
     if (code === undefined || playerIndex === undefined) return;
     const room = rooms[code];
-    if (!room || room.status !== 'playing' || room.mode !== 'rapidez') return;
-    if (room.currentIndex >= room.totalQuestions) return;
+    if (!room || room.status !== 'playing' || room.mode !== 'rapidez' || !room.buzzOpen) return;
     if (room.buzzedPlayer !== null && room.buzzedPlayer !== undefined) return; // ya toco alguien
 
     room.buzzedPlayer = playerIndex;
@@ -326,17 +343,9 @@ io.on('connection', (socket) => {
     const code = socket.data.code;
     const room = rooms[code];
     if (!room || room.players.length < 2) return;
-    room.players.forEach((p) => (p.score = 0));
-    room.questions = buildQuestionSet(TOTAL_QUESTIONS);
-    room.turnOrder = buildTurnOrder(TOTAL_QUESTIONS, 0);
-    room.totalQuestions = TOTAL_QUESTIONS;
-    room.turnTimeMs = TURN_TIME_MS;
-    room.tiebreakRound = 0;
-    room.currentIndex = 0;
-    room.buzzedPlayer = null;
-    room.status = 'playing';
-    io.to(code).emit('game_start', publicState(room));
-    startQuestionPhase(code);
+    room.startPlayer = 1 - room.startPlayer; // alterna quien arranca, para que sea justo
+    setupRoomForNewGame(room);
+    beginGame(code);
   });
 
   socket.on('disconnect', () => {

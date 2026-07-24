@@ -78,12 +78,6 @@
   }
   .turn-banner.mine{color:var(--accent); border-color:#1f5c3d;}
   .turn-banner.theirs{color:var(--gold); border-color:#5c4a1f;}
-  .tiebreak-banner{
-    text-align:center; font-weight:800; font-size:.95rem; margin-bottom:10px; padding:10px;
-    border-radius:10px; background:#3a2a0d; border:1px solid var(--gold); color:var(--gold);
-    display:none;
-  }
-  .tiebreak-banner.show{display:block;}
   .qtext{font-size:1.05rem; line-height:1.5; margin-bottom:18px; color:#fff;}
   .options{display:flex; flex-direction:column; gap:10px;}
   .option{
@@ -196,7 +190,6 @@
   <div id="gameArea" class="hidden">
     <div class="scoreboard" id="scoreboard"></div>
     <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-    <div class="tiebreak-banner" id="tiebreakBanner"></div>
     <div class="turn-banner" id="turnBanner"></div>
     <div class="card">
       <div class="timer-bar"><div class="timer-fill" id="timerFill"></div></div>
@@ -226,13 +219,14 @@ const socket = io();
 let myIndex = null;
 let myName = '';
 let roomCode = '';
-let totalQ = 10;
+let winScore = 10;
 let timerInterval = null;
 let turnTimeS = 20;
 let selectedMode = 'duelo';
 let gameMode = 'duelo';
 let lastState = null;
 let awaitingBuzz = false;
+let buzzPhase = null; // 'reading' | 'open' | 'answered' (solo modo rapidez)
 
 const $ = (id) => document.getElementById(id);
 const LETTERS = ['A','B','C','D'];
@@ -284,38 +278,28 @@ socket.on('join_error', ({message}) => {
 socket.on('game_start', (state) => {
   myIndex = myIndex !== null ? myIndex : 1;
   roomCode = roomCode || '';
-  totalQ = state.total;
+  winScore = state.winScore || 10;
   gameMode = state.mode || 'duelo';
+  buzzPhase = gameMode === 'rapidez' ? 'reading' : null;
   show('gameArea');
   renderState(state);
 });
 
 socket.on('question_update', (state) => {
-  renderState(state);
-});
-
-socket.on('tiebreak_start', (state) => {
+  buzzPhase = (state.mode === 'rapidez') ? 'reading' : null;
   renderState(state);
 });
 
 function renderState(state){
   lastState = state;
-  totalQ = state.total;
+  winScore = state.winScore || winScore;
   gameMode = state.mode || 'duelo';
   turnTimeS = Math.round((state.turnTimeMs || 20000) / 1000);
-
-  const tbBanner = $('tiebreakBanner');
-  if(state.tiebreakRound > 0){
-    tbBanner.classList.add('show');
-    tbBanner.textContent = `⚡ ¡Empate! Ronda de desempate #${state.tiebreakRound} · ${turnTimeS}s por pregunta`;
-  } else {
-    tbBanner.classList.remove('show');
-  }
 
   const rapidez = gameMode === 'rapidez';
   const nobodyBuzzedYet = rapidez && state.turnPlayer === null;
 
-  // scoreboard
+  // scoreboard (progreso hacia el puntaje de victoria)
   const sb = $('scoreboard');
   sb.innerHTML = '';
   state.players.forEach((p, i) => {
@@ -326,14 +310,18 @@ function renderState(state){
     sb.appendChild(div);
   });
 
-  $('progressFill').style.width = (state.currentIndex/totalQ*100)+'%';
+  const leadScore = Math.max(...state.players.map(p => p.score));
+  $('progressFill').style.width = Math.min(100, (leadScore/winScore*100))+'%';
 
   const isMine = state.turnPlayer === myIndex;
   const banner = $('turnBanner');
   if(rapidez){
-    if(nobodyBuzzedYet){
+    if(buzzPhase === 'reading'){
       banner.className = 'turn-banner';
-      banner.textContent = '🔥 ¡Prepárate! El primero en tocar responde.';
+      banner.textContent = '📖 Lee la pregunta con calma...';
+    } else if(nobodyBuzzedYet){
+      banner.className = 'turn-banner';
+      banner.textContent = '🔥 ¡Ya puedes tocar! El primero responde.';
     } else {
       banner.className = 'turn-banner ' + (isMine ? 'mine':'theirs');
       banner.textContent = isMine ? '🎯 ¡Tocaste primero! Responde la pregunta.' : `⏳ ${state.players[state.turnPlayer].name} tocó primero...`;
@@ -343,13 +331,13 @@ function renderState(state){
     banner.textContent = isMine ? '🎯 ¡Es tu turno! Responde la pregunta.' : `⏳ Turno de ${state.players[state.turnPlayer].name}`;
   }
 
-  $('qtext').textContent = `Pregunta ${state.currentIndex+1}/${totalQ}: ${state.question.q}`;
+  $('qtext').textContent = `Pregunta ${state.currentIndex+1} (a ${winScore} pts): ${state.question.q}`;
   const optsDiv = $('options');
   optsDiv.innerHTML = '';
   $('feedback').classList.remove('show','ok','bad');
 
-  const canAnswer = rapidez ? isMine && !nobodyBuzzedYet : isMine;
-  $('waitingNote').classList.toggle('hidden', canAnswer || nobodyBuzzedYet);
+  const canAnswer = rapidez ? (isMine && buzzPhase === 'answered') : isMine;
+  $('waitingNote').classList.toggle('hidden', canAnswer || nobodyBuzzedYet || buzzPhase === 'reading');
 
   state.question.options.forEach((opt, idx) => {
     const div = document.createElement('div');
@@ -364,28 +352,41 @@ function renderState(state){
     optsDiv.appendChild(div);
   });
 
-  // zona de "toque" para el modo rapidez
+  renderBuzzZone(state);
+
+  // en modo rapidez la barra de tiempo se maneja con los eventos reading_phase / buzz_open / buzzed
+  if(!rapidez) startTimerBar();
+}
+
+function renderBuzzZone(state){
   const buzzZone = $('buzzZone');
-  if(rapidez && nobodyBuzzedYet){
-    awaitingBuzz = true;
-    buzzZone.classList.remove('hidden','locked');
-    buzzZone.classList.add('waiting');
-    buzzZone.textContent = '🔔 ¡Toca aquí o presiona cualquier tecla!';
-  } else if(rapidez){
+  if(gameMode !== 'rapidez'){
+    awaitingBuzz = false;
+    buzzZone.classList.add('hidden');
+    return;
+  }
+  buzzZone.classList.remove('hidden');
+  if(buzzPhase === 'reading'){
     awaitingBuzz = false;
     buzzZone.classList.remove('waiting');
     buzzZone.classList.add('locked');
-    buzzZone.textContent = isMine ? '🎯 ¡Tocaste primero!' : `⏳ ${state.players[state.turnPlayer].name} tocó primero`;
+    buzzZone.textContent = '📖 Leyendo la pregunta...';
+  } else if(buzzPhase === 'open'){
+    awaitingBuzz = true;
+    buzzZone.classList.remove('locked');
+    buzzZone.classList.add('waiting');
+    buzzZone.textContent = '🔔 ¡Toca aquí o presiona cualquier tecla!';
   } else {
     awaitingBuzz = false;
-    buzzZone.classList.add('hidden');
+    buzzZone.classList.remove('waiting');
+    buzzZone.classList.add('locked');
+    const isMine = state.turnPlayer === myIndex;
+    buzzZone.textContent = isMine ? '🎯 ¡Tocaste primero!' : `⏳ ${state.players[state.turnPlayer].name} tocó primero`;
   }
-
-  startTimerBar();
 }
 
 function tryBuzz(){
-  if(!awaitingBuzz || gameMode !== 'rapidez') return;
+  if(!awaitingBuzz || gameMode !== 'rapidez' || buzzPhase !== 'open') return;
   awaitingBuzz = false;
   socket.emit('buzz');
 }
@@ -396,12 +397,30 @@ document.addEventListener('keydown', () => {
   if(!$('gameArea').classList.contains('hidden')) tryBuzz();
 });
 
+socket.on('reading_phase', ({ readDelayMs }) => {
+  if(!lastState) return;
+  buzzPhase = 'reading';
+  clearInterval(timerInterval);
+  $('timerFill').style.width = '100%';
+  $('timerFill').style.background = 'var(--accent2)';
+  renderBuzzZone(lastState);
+});
+
+socket.on('buzz_open', () => {
+  if(!lastState) return;
+  buzzPhase = 'open';
+  renderBuzzZone(lastState);
+  turnTimeS = Math.round((lastState.turnTimeMs || 20000) / 1000);
+  startTimerBar();
+});
+
 socket.on('buzzed', ({ playerIndex, answerTimeMs }) => {
   if(!lastState) return;
-  awaitingBuzz = false;
+  buzzPhase = 'answered';
   lastState.turnPlayer = playerIndex;
   if(answerTimeMs) turnTimeS = Math.round(answerTimeMs / 1000);
   renderState(lastState);
+  startTimerBar();
 });
 
 function startTimerBar(){
@@ -448,7 +467,7 @@ socket.on('answer_result', ({playerIndex, optionIndex, correctIndex, isCorrect, 
   document.querySelectorAll('.score-card .pscore').forEach((el,i)=>{ el.textContent = scores[i]; });
 });
 
-socket.on('game_over', ({scores, players, tiebreakRound}) => {
+socket.on('game_over', ({scores, players}) => {
   clearInterval(timerInterval);
   show('resultArea');
   const [s0, s1] = scores;
@@ -458,13 +477,6 @@ socket.on('game_over', ({scores, players, tiebreakRound}) => {
   winnerText.textContent = iWon ? `🏆 ¡Ganaste, ${players[winnerIdx]}!` : `🏆 Ganó ${players[winnerIdx]}`;
   const fs = $('finalScores');
   fs.innerHTML = '';
-  if(tiebreakRound > 0){
-    const note = document.createElement('p');
-    note.className = 'muted';
-    note.style.marginBottom = '4px';
-    note.textContent = `Se definió en la ronda de desempate #${tiebreakRound}`;
-    fs.parentElement.insertBefore(note, fs);
-  }
   players.forEach((name, i)=>{
     const div = document.createElement('div');
     div.className = 'score-card';
