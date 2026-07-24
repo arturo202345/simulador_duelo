@@ -78,6 +78,12 @@
   }
   .turn-banner.mine{color:var(--accent); border-color:#1f5c3d;}
   .turn-banner.theirs{color:var(--gold); border-color:#5c4a1f;}
+  .tiebreak-banner{
+    text-align:center; font-weight:800; font-size:.95rem; margin-bottom:10px; padding:10px;
+    border-radius:10px; background:#3a2a0d; border:1px solid var(--gold); color:var(--gold);
+    display:none;
+  }
+  .tiebreak-banner.show{display:block;}
   .qtext{font-size:1.05rem; line-height:1.5; margin-bottom:18px; color:#fff;}
   .options{display:flex; flex-direction:column; gap:10px;}
   .option{
@@ -153,6 +159,7 @@
   <div id="gameArea" class="hidden">
     <div class="scoreboard" id="scoreboard"></div>
     <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="tiebreak-banner" id="tiebreakBanner"></div>
     <div class="turn-banner" id="turnBanner"></div>
     <div class="card">
       <div class="timer-bar"><div class="timer-fill" id="timerFill"></div></div>
@@ -183,7 +190,7 @@ let myName = '';
 let roomCode = '';
 let totalQ = 10;
 let timerInterval = null;
-const TURN_TIME_S = 20;
+let turnTimeS = 20;
 
 const $ = (id) => document.getElementById(id);
 const LETTERS = ['A','B','C','D'];
@@ -233,8 +240,22 @@ socket.on('question_update', (state) => {
   renderState(state);
 });
 
+socket.on('tiebreak_start', (state) => {
+  renderState(state);
+});
+
 function renderState(state){
   totalQ = state.total;
+  turnTimeS = Math.round((state.turnTimeMs || 20000) / 1000);
+
+  const tbBanner = $('tiebreakBanner');
+  if(state.tiebreakRound > 0){
+    tbBanner.classList.add('show');
+    tbBanner.textContent = `⚡ ¡Empate! Ronda de desempate #${state.tiebreakRound} · ${turnTimeS}s por pregunta`;
+  } else {
+    tbBanner.classList.remove('show');
+  }
+
   // scoreboard
   const sb = $('scoreboard');
   sb.innerHTML = '';
@@ -276,14 +297,14 @@ function renderState(state){
 
 function startTimerBar(){
   clearInterval(timerInterval);
-  let t = TURN_TIME_S;
+  let t = turnTimeS;
   $('timerFill').style.width = '100%';
   $('timerFill').style.background = 'var(--gold)';
   timerInterval = setInterval(() => {
     t -= 1;
-    const pct = Math.max(0, (t/TURN_TIME_S)*100);
+    const pct = Math.max(0, (t/turnTimeS)*100);
     $('timerFill').style.width = pct+'%';
-    if(t <= 5) $('timerFill').style.background = 'var(--red)';
+    if(t <= Math.ceil(turnTimeS*0.25)) $('timerFill').style.background = 'var(--red)';
     if(t <= 0) clearInterval(timerInterval);
   }, 1000);
 }
@@ -310,20 +331,23 @@ socket.on('answer_result', ({playerIndex, optionIndex, correctIndex, isCorrect, 
   document.querySelectorAll('.score-card .pscore').forEach((el,i)=>{ el.textContent = scores[i]; });
 });
 
-socket.on('game_over', ({scores, players}) => {
+socket.on('game_over', ({scores, players, tiebreakRound}) => {
   clearInterval(timerInterval);
   show('resultArea');
   const [s0, s1] = scores;
   const winnerText = $('winnerText');
-  if(s0 === s1){
-    winnerText.textContent = '🤝 ¡Empate!';
-  } else {
-    const winnerIdx = s0 > s1 ? 0 : 1;
-    const iWon = winnerIdx === myIndex;
-    winnerText.textContent = iWon ? `🏆 ¡Ganaste, ${players[winnerIdx]}!` : `🏆 Ganó ${players[winnerIdx]}`;
-  }
+  const winnerIdx = s0 > s1 ? 0 : 1;
+  const iWon = winnerIdx === myIndex;
+  winnerText.textContent = iWon ? `🏆 ¡Ganaste, ${players[winnerIdx]}!` : `🏆 Ganó ${players[winnerIdx]}`;
   const fs = $('finalScores');
   fs.innerHTML = '';
+  if(tiebreakRound > 0){
+    const note = document.createElement('p');
+    note.className = 'muted';
+    note.style.marginBottom = '4px';
+    note.textContent = `Se definió en la ronda de desempate #${tiebreakRound}`;
+    fs.parentElement.insertBefore(note, fs);
+  }
   players.forEach((name, i)=>{
     const div = document.createElement('div');
     div.className = 'score-card';

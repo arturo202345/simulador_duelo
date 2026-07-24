@@ -93,7 +93,13 @@ const BANK = [
 const QUESTIONS_PER_PLAYER = 5;
 const TOTAL_QUESTIONS = QUESTIONS_PER_PLAYER * 2;
 const NEXT_DELAY_MS = 3200; // tiempo para mostrar feedback antes de pasar de turno
-const TURN_TIME_MS = 20000; // tiempo limite por pregunta
+const TURN_TIME_MS = 20000; // tiempo limite por pregunta (ronda normal)
+
+// Desempate: rondas mas cortas y con menos tiempo, se repiten hasta que haya ganador
+const TIEBREAK_QUESTIONS_PER_PLAYER = 2;
+const TIEBREAK_TOTAL_QUESTIONS = TIEBREAK_QUESTIONS_PER_PLAYER * 2;
+const TIEBREAK_TIME_STEP_MS = 3000; // cuanto se reduce el tiempo por cada ronda extra
+const TIEBREAK_MIN_TIME_MS = 6000; // piso minimo de tiempo por pregunta
 
 function shuffle(arr) {
   const a = arr.slice();
@@ -104,14 +110,18 @@ function shuffle(arr) {
   return a;
 }
 
-function buildQuestionSet() {
-  const chosen = shuffle(BANK).slice(0, TOTAL_QUESTIONS);
+function buildQuestionSet(count) {
+  const chosen = shuffle(BANK).slice(0, count);
   return chosen.map(([q, opts, correctIdx]) => {
     const correctText = opts[correctIdx];
     const order = shuffle(opts.map((_, i) => i));
     const newOpts = order.map((i) => opts[i]);
     return { q, options: newOpts, correct: newOpts.indexOf(correctText) };
   });
+}
+
+function buildTurnOrder(total, startPlayer) {
+  return Array.from({ length: total }, (_, i) => (i + startPlayer) % 2);
 }
 
 function genCode() {
@@ -127,14 +137,17 @@ const rooms = {};
 
 function publicState(room) {
   const idx = room.currentIndex;
-  const turnPlayer = idx < TOTAL_QUESTIONS ? room.turnOrder[idx] : null;
+  const total = room.totalQuestions;
+  const turnPlayer = idx < total ? room.turnOrder[idx] : null;
   return {
     players: room.players.map((p) => ({ name: p.name, score: p.score, connected: p.connected })),
     currentIndex: idx,
-    total: TOTAL_QUESTIONS,
+    total,
     turnPlayer,
-    question: idx < TOTAL_QUESTIONS ? { q: room.questions[idx].q, options: room.questions[idx].options } : null,
+    question: idx < total ? { q: room.questions[idx].q, options: room.questions[idx].options } : null,
     status: room.status,
+    turnTimeMs: room.turnTimeMs,
+    tiebreakRound: room.tiebreakRound || 0,
   };
 }
 
@@ -145,14 +158,15 @@ function startTurnTimer(code) {
   room.timer = setTimeout(() => {
     // se acabo el tiempo -> se cuenta como incorrecta, avanza automaticamente
     handleAnswer(code, room.turnOrder[room.currentIndex], -1, true);
-  }, TURN_TIME_MS);
+  }, room.turnTimeMs);
 }
 
 function handleAnswer(code, playerIndex, optionIndex, timedOut) {
   const room = rooms[code];
   if (!room || room.status !== 'playing') return;
   const idx = room.currentIndex;
-  if (idx >= TOTAL_QUESTIONS) return;
+  const total = room.totalQuestions;
+  if (idx >= total) return;
   if (room.turnOrder[idx] !== playerIndex) return; // no es su turno
 
   clearTimeout(room.timer);
@@ -172,9 +186,30 @@ function handleAnswer(code, playerIndex, optionIndex, timedOut) {
   room.currentIndex += 1;
 
   setTimeout(() => {
-    if (room.currentIndex >= TOTAL_QUESTIONS) {
-      room.status = 'finished';
-      io.to(code).emit('game_over', { scores: room.players.map((p) => p.score), players: room.players.map(p=>p.name) });
+    if (room.currentIndex >= total) {
+      const [s0, s1] = room.players.map((p) => p.score);
+      if (s0 === s1) {
+        // Empate -> ronda de desempate: menos preguntas y menos tiempo, reinicia marcador
+        room.tiebreakRound = (room.tiebreakRound || 0) + 1;
+        room.turnTimeMs = Math.max(TIEBREAK_MIN_TIME_MS, (room.turnTimeMs || TURN_TIME_MS) - TIEBREAK_TIME_STEP_MS);
+        room.players.forEach((p) => (p.score = 0));
+        room.totalQuestions = TIEBREAK_TOTAL_QUESTIONS;
+        room.questions = buildQuestionSet(TIEBREAK_TOTAL_QUESTIONS);
+        // el jugador que no empezo la ronda anterior arranca esta, para que sea justo
+        const startPlayer = room.tiebreakRound % 2;
+        room.turnOrder = buildTurnOrder(TIEBREAK_TOTAL_QUESTIONS, startPlayer);
+        room.currentIndex = 0;
+        room.status = 'playing';
+        io.to(code).emit('tiebreak_start', publicState(room));
+        startTurnTimer(code);
+      } else {
+        room.status = 'finished';
+        io.to(code).emit('game_over', {
+          scores: room.players.map((p) => p.score),
+          players: room.players.map((p) => p.name),
+          tiebreakRound: room.tiebreakRound || 0,
+        });
+      }
     } else {
       io.to(code).emit('question_update', publicState(room));
       startTurnTimer(code);
@@ -190,6 +225,9 @@ io.on('connection', (socket) => {
       questions: [],
       turnOrder: [],
       currentIndex: 0,
+      totalQuestions: TOTAL_QUESTIONS,
+      turnTimeMs: TURN_TIME_MS,
+      tiebreakRound: 0,
       status: 'waiting',
       timer: null,
     };
@@ -209,8 +247,11 @@ io.on('connection', (socket) => {
     socket.data.code = code;
     socket.data.playerIndex = 1;
 
-    room.questions = buildQuestionSet();
-    room.turnOrder = Array.from({ length: TOTAL_QUESTIONS }, (_, i) => i % 2);
+    room.questions = buildQuestionSet(TOTAL_QUESTIONS);
+    room.turnOrder = buildTurnOrder(TOTAL_QUESTIONS, 0);
+    room.totalQuestions = TOTAL_QUESTIONS;
+    room.turnTimeMs = TURN_TIME_MS;
+    room.tiebreakRound = 0;
     room.currentIndex = 0;
     room.status = 'playing';
 
@@ -230,8 +271,11 @@ io.on('connection', (socket) => {
     const room = rooms[code];
     if (!room || room.players.length < 2) return;
     room.players.forEach((p) => (p.score = 0));
-    room.questions = buildQuestionSet();
-    room.turnOrder = Array.from({ length: TOTAL_QUESTIONS }, (_, i) => i % 2);
+    room.questions = buildQuestionSet(TOTAL_QUESTIONS);
+    room.turnOrder = buildTurnOrder(TOTAL_QUESTIONS, 0);
+    room.totalQuestions = TOTAL_QUESTIONS;
+    room.turnTimeMs = TURN_TIME_MS;
+    room.tiebreakRound = 0;
     room.currentIndex = 0;
     room.status = 'playing';
     io.to(code).emit('game_start', publicState(room));
